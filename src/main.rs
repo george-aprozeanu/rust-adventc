@@ -17,6 +17,7 @@ fn main() -> MyResult<()> {
     day3::p2("./input/input3.txt")?;
     day4::p1("./input/input4.txt")?;
     day4::p2("./input/input4.txt")?;
-    day5::p1("./input/demo5.txt")?;
+    day5::p1("./input/input5.txt")?;
+    day5::p2("./input/demo5.txt")?;
     Ok(())
 }
