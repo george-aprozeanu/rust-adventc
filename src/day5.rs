@@ -30,15 +30,27 @@ impl Category {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Range {
-    from: u64,
-    size: u64,
+    from: i64,
+    size: i64,
 }
 
 impl Range {
-    fn to(&self) -> u64 {
+    fn to(&self) -> i64 {
         return self.from + self.size - 1;
+    }
+    fn move_by(&self, value: i64) -> Range {
+        Range {
+            from: self.from + value,
+            size: self.size,
+        }
+    }
+    fn project(&self, dest: i64) -> Range {
+        Range {
+            from: dest,
+            size: self.size,
+        }
     }
     fn intersect(&self, range: &Range) -> Option<Range> {
         Range::start_end(
@@ -46,95 +58,149 @@ impl Range {
             cmp::min(self.to(), range.to()),
         )
     }
-    fn start_end(start: u64, end: u64) -> Option<Range> {
+    fn prefix(&self, range: &Range) -> Option<Range> {
+        (self.from < range.from)
+            .then(|| ())
+            .and_then(|_| Range::start_end(
+                self.from,
+                cmp::min(self.to(), range.to()),
+            ))
+    }
+    fn substract(&self, range: &Range) -> Vec<Range> {
+        if let Some(inter) = self.intersect(&range) {
+            vec![]
+        } else {
+            vec![self.clone()]
+        }
+    }
+    fn start_end(start: i64, end: i64) -> Option<Range> {
         (start <= end).then(|| Range {
             from: start,
             size: end + 1 - start,
         })
     }
-    fn start_size(from: u64, size: u64) -> Option<Range> {
-        (size > 0).then(|| Range { from, size })
+    fn from_size(from: i64, size: i64) -> Option<Range> {
+        (size > 0).then(|| Range {
+            from,
+            size: size.try_into().unwrap(),
+        })
     }
-    fn tr(&self, value: u64, dest: u64) -> Option<u64> {
+    fn tr_val(&self, value: i64, dest: i64) -> Option<i64> {
         (self.from <= value && value <= self.to()).then(|| value + dest - self.from)
     }
-
-    fn tr_range(&self, range: &Range, dest: u64) -> Range {
-        Range {
-            from: range.from + dest - self.from,
-            size: range.size,
-        }
-    }
 }
 
-#[derive(Clone, Debug)]
-struct TranslationRange {
-    source: Range,
-    dest: u64,
+#[derive(Clone, Debug, PartialEq)]
+struct Translation {
+    range: Range,
+    dest: i64,
 }
 
-impl TranslationRange {
-    fn from(vec: &Vec<&str>) -> MyResult<TranslationRange> {
+impl Translation {
+    fn from_str(vec: &Vec<&str>) -> MyResult<Translation> {
         let from = vec[1].parse()?;
         let size = vec[2].parse()?;
         let dest = vec[0].parse()?;
-        Ok(TranslationRange {
-            source: Range::start_size(from, size).ok_or("range?")?,
+        Ok(Translation {
+            range: Range::from_size(from, size).ok_or("range?")?,
             dest,
         })
     }
-    fn tr(&self, val: u64) -> Option<u64> {
-        self.source.tr(val, self.dest)
+    fn tr_val(&self, val: i64) -> Option<i64> {
+        self.range.tr_val(val, self.dest)
     }
-    fn tr_range(&self, range: &Range) -> Option<Range> {
-        self.source
-            .intersect(range)
-            .map(|intr| self.source.tr_range(&intr, self.dest))
-    }
+    fn join(&self, other: &Translation) -> Vec<Translation> {
+        let project = self.range.project(self.dest);
+        let inter = project.intersect(&other.range);
+        let inter_join = inter
+            .map(|inter| inter.move_by(self.range.from - project.from))
+            .map(|inter| Translation {
+                range: inter,
+                dest: other.dest,
+            });
+        let outer = project.substract(&other.range);
 
-    fn join(&self, tr_range: &TranslationRange) -> Option<TranslationRange> {
-        self.tr_range(&tr_range.source)
-            .map(|inter| TranslationRange::from_range(inter, self.dest))
-    }
+        let projection_start = self.dest;
+        let inter_start = cmp::max(projection_start, other.range.from);
+        let inter_join_start = inter_start - projection_start + self.range.from;
+        let prefix_size = inter_join_start - self.range.from;
 
-    fn from_range(source: Range, dest: u64) -> TranslationRange {
-        TranslationRange { source, dest }
+        [
+            inter_join,
+            (prefix_size > 0).then(|| Translation {
+                range: Range {
+                    from: self.range.from,
+                    size: prefix_size,
+                },
+                dest: self.dest,
+            }),
+        ]
+        .into_iter()
+        .filter_map(|a| a)
+        .collect()
     }
 }
 
-struct InputSet<'a> {
-    seed: &'a InputMap,
-    soil: &'a InputMap,
-    fertilizer: &'a InputMap,
-    water: &'a InputMap,
-    light: &'a InputMap,
-    temperature: &'a InputMap,
-    humidity: &'a InputMap,
+#[test]
+fn test_translation_join() {
+    let that = Translation {
+        range: Range { from: 1, size: 8 },
+        dest: 8,
+    };
+    let other = Translation {
+        range: Range { from: 12, size: 40 },
+        dest: 100,
+    };
+    let result = that.join(&other);
+    assert_eq!(
+        result,
+        [Translation {
+            range: Range { from: 5, size: 4 },
+            dest: 100
+        }]
+    );
 }
 
-impl InputSet<'_> {
-    fn filter(input_maps: &Vec<InputMap>, category: Category) -> MyResult<&InputMap> {
+struct TranslationMap<'a> {
+    seed: &'a TranslationCategory,
+    soil: &'a TranslationCategory,
+    fertilizer: &'a TranslationCategory,
+    water: &'a TranslationCategory,
+    light: &'a TranslationCategory,
+    temperature: &'a TranslationCategory,
+    humidity: &'a TranslationCategory,
+    translations: Translations,
+}
+
+impl TranslationMap<'_> {
+    fn filter(
+        input_maps: &Vec<TranslationCategory>,
+        category: Category,
+    ) -> MyResult<&TranslationCategory> {
         Ok(input_maps
             .iter()
-            .find(|input_map| input_map.from.eq(&category))
+            .find(|input_map| input_map.category.eq(&category))
             .ok_or("seed?")?)
     }
-    fn of(input_maps: &Vec<InputMap>) -> MyResult<InputSet> {
-        let seed = InputSet::filter(input_maps, Category::Seed)?;
-        let soil = InputSet::filter(input_maps, Category::Soil)?;
-        let fertilizer = InputSet::filter(input_maps, Category::Fertilizer)?;
-        let water = InputSet::filter(input_maps, Category::Water)?;
-        let light = InputSet::filter(input_maps, Category::Light)?;
-        let temperature = InputSet::filter(input_maps, Category::Temperature)?;
-        let humidity = InputSet::filter(input_maps, Category::Humidity)?;
+    fn of(categories: &Vec<TranslationCategory>) -> MyResult<TranslationMap> {
+        let seed = TranslationMap::filter(categories, Category::Seed)?;
+        let soil = TranslationMap::filter(categories, Category::Soil)?;
+        let fertilizer = TranslationMap::filter(categories, Category::Fertilizer)?;
+        let water = TranslationMap::filter(categories, Category::Water)?;
+        let light = TranslationMap::filter(categories, Category::Light)?;
+        let temperature = TranslationMap::filter(categories, Category::Temperature)?;
+        let humidity = TranslationMap::filter(categories, Category::Humidity)?;
 
-        let tr_ranges = seed.tr_ranges.join(&soil.tr_ranges);
-        println!(
-            "\n\nseed {:?} \njoin {:?} \n= {:?}",
-            seed.tr_ranges, soil.tr_ranges, tr_ranges
-        );
+        let translations = seed
+            .translations
+            .join(&soil.translations)
+            .join(&fertilizer.translations)
+            .join(&water.translations)
+            .join(&light.translations)
+            .join(&temperature.translations)
+            .join(&humidity.translations);
 
-        Ok(InputSet {
+        Ok(TranslationMap {
             seed,
             soil,
             fertilizer,
@@ -142,9 +208,10 @@ impl InputSet<'_> {
             light,
             temperature,
             humidity,
+            translations,
         })
     }
-    fn tr(&self, seed: u64) -> u64 {
+    fn tr(&self, seed: i64) -> i64 {
         let soil = self.seed.tr(seed);
         let fertilizer = self.soil.tr(soil);
         let water = self.fertilizer.tr(fertilizer);
@@ -168,52 +235,85 @@ impl InputSet<'_> {
         // location
         None
     }
-
-    fn tr_ranges(&self, seed_ranges: &Vec<&Range>) -> Vec<Range> {
-        let soil = self.seed.tr_ranges(seed_ranges);
-        vec![]
-    }
 }
 
 #[derive(Debug)]
-struct TranslationRanges {
-    ranges: Vec<TranslationRange>,
+struct Translations {
+    translations: Vec<Translation>,
 }
 
-impl TranslationRanges {
-    fn intersect(&self, other: &TranslationRange) -> Vec<TranslationRange> {
-        self.ranges
+impl Translations {
+    fn join_one(&self, other: &Translation) -> Vec<Translation> {
+        self.translations
             .iter()
-            .filter_map(|that| that.join(&other))
+            .flat_map(|that| that.join(&other))
             .collect()
     }
-    fn join(&self, other: &TranslationRanges) -> TranslationRanges {
-        let ranges: Vec<TranslationRange> = other
-            .ranges
+    fn join(&self, other: &Translations) -> Translations {
+        let translations: Vec<Translation> = other
+            .translations
             .iter()
-            .map(|other| self.intersect(other))
-            .collect::<Vec<Vec<TranslationRange>>>()
-            .concat();
-        TranslationRanges { ranges }
+            .flat_map(|other| self.join_one(other))
+            .collect();
+        Translations { translations }
     }
-    fn tr(&self, val: u64) -> Option<u64> {
-        self.ranges.iter().find_map(|pair| pair.tr(val))
+    fn tr_val(&self, val: i64) -> Option<i64> {
+        self.translations.iter().find_map(|pair| pair.tr_val(val))
     }
+}
+
+#[test]
+fn test_translations_join_one() {
+    let that = Translations {
+        translations: vec![
+            Translation {
+                range: Range { from: 1, size: 4 },
+                dest: 100,
+            },
+            Translation {
+                range: Range { from: 10, size: 4 },
+                dest: 200,
+            },
+        ],
+    };
+    let other = Translation {
+        range: Range {
+            from: 102,
+            size: 100,
+        },
+        dest: 1000,
+    };
+    let result = that.join_one(&other);
+    assert_eq!(
+        result,
+        [
+            Translation {
+                range: Range { from: 3, size: 2 },
+                dest: 1000
+            },
+            Translation {
+                range: Range { from: 10, size: 2 },
+                dest: 1000
+            }
+        ]
+    );
 }
 
 #[derive(Debug)]
-struct InputMap {
-    from: Category,
-    tr_ranges: TranslationRanges,
+struct TranslationCategory {
+    category: Category,
+    translations: Translations,
 }
 
-impl InputMap {
-    fn read(lines: &mut impl Iterator<Item = io::Result<String>>) -> MyResult<Option<InputMap>> {
+impl TranslationCategory {
+    fn read(
+        lines: &mut impl Iterator<Item = io::Result<String>>,
+    ) -> MyResult<Option<TranslationCategory>> {
         if let Some(title_line) = lines.next() {
             let title_line = title_line?;
             let from_sep = title_line.find("-to-").ok_or("'-to-' ?")?;
             let from = &title_line[0..from_sep];
-            let mut ranges: Vec<TranslationRange> = vec![];
+            let mut translations: Vec<Translation> = vec![];
             loop {
                 if let Some(line) = lines.next() {
                     let line = line?;
@@ -221,48 +321,28 @@ impl InputMap {
                         break;
                     }
                     let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                    ranges.push(TranslationRange::from(&parts)?);
+                    translations.push(Translation::from_str(&parts)?);
                 } else {
                     break;
                 }
             }
-            Ok(Some(InputMap {
-                from: Category::of(from),
-                tr_ranges: TranslationRanges { ranges },
+            Ok(Some(TranslationCategory {
+                category: Category::of(from),
+                translations: Translations { translations },
             }))
         } else {
             Ok(None)
         }
     }
-    fn tr(&self, val: u64) -> u64 {
-        self.tr_ranges.tr(val).get_or_insert(val).to_owned()
-    }
-    fn tr_range(&self, range: &Range) -> Vec<Range> {
-        let mut vec: Vec<Range> = self
-            .tr_ranges
-            .ranges
-            .iter()
-            .filter_map(|pair| pair.tr_range(range))
-            .collect();
-        if vec.len() == 0 {
-            vec.push(Range::clone(range))
-        }
-        vec
-    }
-
-    fn tr_ranges(&self, ranges: &Vec<&Range>) -> Vec<Range> {
-        ranges
-            .iter()
-            .map(|range| self.tr_range(range))
-            .collect::<Vec<Vec<Range>>>()
-            .concat()
+    fn tr(&self, val: i64) -> i64 {
+        self.translations.tr_val(val).get_or_insert(val).to_owned()
     }
 }
 
-fn seeds(line: &str) -> MyResult<Vec<u64>> {
+fn seeds(line: &str) -> MyResult<Vec<i64>> {
     let space = line.find(' ').ok_or("space?")?;
     let seed_str = &line[space + 1..];
-    let seeds: Vec<u64> = seed_str
+    let seeds: Vec<i64> = seed_str
         .split(' ')
         .map(|a| a.parse())
         .collect::<Result<_, _>>()?;
@@ -278,34 +358,35 @@ pub fn p1(file: &str) -> MyResult<()> {
     let line = lines.next().ok_or("first?")??;
     let seeds = seeds(line.as_ref())?;
     lines.next().ok_or("next?")??;
-    let mut input_maps: Vec<InputMap> = vec![];
+    let mut categories: Vec<TranslationCategory> = vec![];
     loop {
-        if let Some(map) = InputMap::read(&mut lines)? {
-            input_maps.push(map);
+        if let Some(map) = TranslationCategory::read(&mut lines)? {
+            categories.push(map);
         } else {
             break;
         }
     }
-    let input_set = InputSet::of(&input_maps)?;
+    let translation_map = TranslationMap::of(&categories)?;
     let min = seeds
         .iter()
-        .map(|val| input_set.tr(val.to_owned()))
+        .map(|val| translation_map.tr(val.to_owned()))
         .min()
         .ok_or("min?")?;
     println!("day5p1 {}", min);
+
     Ok(())
 }
 
 fn seed_pairs(line: &str) -> MyResult<Vec<Range>> {
     let space = line.find(' ').ok_or("space?")?;
     let seed_str = &line[space + 1..];
-    let (_, ranges) = seed_str.split(' ').map(|a| a.parse::<u64>()).try_fold(
+    let (_, ranges) = seed_str.split(' ').map(|a| a.parse::<i64>()).try_fold(
         (None, vec![]),
-        |(prev, vec), next| -> MyResult<(Option<u64>, Vec<Range>)> {
+        |(prev, vec), next| -> MyResult<(Option<i64>, Vec<Range>)> {
             match prev {
                 Some(prev) => Ok((
                     None,
-                    [vec, vec![Range::start_size(prev, next?).ok_or("size?")?]].concat(),
+                    [vec, vec![Range::from_size(prev, next?).ok_or("size?")?]].concat(),
                 )),
                 None => Ok((Some(next?), vec)),
             }
@@ -323,19 +404,15 @@ pub fn p2(file: &str) -> MyResult<()> {
     let line = lines.next().ok_or("first?")??;
     let seed_pairs = seed_pairs(line.as_ref())?;
     lines.next().ok_or("next?")??;
-    let mut input_maps: Vec<InputMap> = vec![];
+    let mut translation_maps: Vec<TranslationCategory> = vec![];
     loop {
-        if let Some(map) = InputMap::read(&mut lines)? {
-            input_maps.push(map);
+        if let Some(map) = TranslationCategory::read(&mut lines)? {
+            translation_maps.push(map);
         } else {
             break;
         }
     }
-    let input_set = InputSet::of(&input_maps)?;
-    // let min: Vec<Range> = seed_pairs
-    //     .into_iter()
-    //     .filter_map(|range| input_set.tr_range(&range))
-    //     .collect();
-    // println!("day5p2 {:?}", min);
+    let translation_map = TranslationMap::of(&translation_maps)?;
+    println!("{:?} translations", translation_map.translations);
     Ok(())
 }
